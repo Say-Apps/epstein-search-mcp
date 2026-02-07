@@ -38,6 +38,21 @@ function normalizeName(s: string) {
   return s.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function trigrams(s: string) {
+  const t = normalizeName(s).replace(/[^a-z0-9\s]/g, "");
+  const padded = `  ${t}  `;
+  const out = new Set<string>();
+  for (let i = 0; i < padded.length - 2; i++) out.add(padded.slice(i, i + 3));
+  return out;
+}
+
+function jaccard(a: Set<string>, b: Set<string>) {
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  const union = a.size + b.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
 function extractPeopleHeuristic(text: string): string[] {
   // Heuristic: pick sequences of 2-3 capitalized words, filter obvious noise.
   // This is a placeholder until we do a proper NER pass in the ingest pipeline.
@@ -287,16 +302,58 @@ export default {
 
     if (url.pathname === "/people") {
       const name = (url.searchParams.get("name") || "").trim();
+      const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") || 50)));
       if (!name) return json({ name, results: [] });
-      const key = `people:${normalizeName(name)}`;
+
+      const normalized = normalizeName(name);
+      const exactKey = `people:${normalized}`;
+      const exactRaw = await env.CORPUS.get(exactKey);
+      if (exactRaw) {
+        const ids: string[] = JSON.parse(exactRaw) as any;
+        const results: Array<{ id: string; title: string }> = [];
+        for (const id of ids.slice(0, limit)) {
+          const doc = await getDoc(env, id);
+          if (doc) results.push({ id, title: doc.title || id });
+        }
+        return json({ name, normalized, match: { type: "exact", name: normalized, score: 1 }, results });
+      }
+
+      // Fuzzy name retrieval via trigram index
+      const qTri = trigrams(normalized);
+      const candidateNames = new Map<string, number>();
+      for (const tri of qTri) {
+        const raw = await env.CORPUS.get(`ng:${tri}`);
+        if (!raw) continue;
+        const names: string[] = JSON.parse(raw) as any;
+        for (const n of names) candidateNames.set(n, (candidateNames.get(n) || 0) + 1);
+      }
+
+      const scored: Array<{ name: string; score: number }> = [];
+      for (const n of candidateNames.keys()) {
+        const s = jaccard(qTri, trigrams(n));
+        if (s >= 0.25) scored.push({ name: n, score: s });
+      }
+      scored.sort((a, b) => b.score - a.score);
+
+      const best = scored[0];
+      if (!best) return json({ name, normalized, match: { type: "none" }, suggestions: scored.slice(0, 10), results: [] });
+
+      const key = `people:${best.name}`;
       const raw = await env.CORPUS.get(key);
       const ids: string[] = raw ? (JSON.parse(raw) as any) : [];
       const results: Array<{ id: string; title: string }> = [];
-      for (const id of ids.slice(0, 50)) {
+      for (const id of ids.slice(0, limit)) {
         const doc = await getDoc(env, id);
         if (doc) results.push({ id, title: doc.title || id });
       }
-      return json({ name, results });
+
+      return json({
+        name,
+        normalized,
+        match: { type: "fuzzy", name: best.name, score: best.score },
+        suggestions: scored.slice(0, 10),
+        results,
+      });
     }
 
     if (url.pathname === "/doc") {
@@ -340,11 +397,21 @@ export default {
         : extractPeopleHeuristic(text);
 
       for (const p of peopleList) {
-        const k = `people:${normalizeName(p)}`;
+        const norm = normalizeName(p);
+        const k = `people:${norm}`;
         const existingRaw = await env.CORPUS.get(k);
         const existing = new Set<string>(existingRaw ? (JSON.parse(existingRaw) as any) : []);
         existing.add(id);
         await env.CORPUS.put(k, JSON.stringify([...existing]));
+
+        // Trigram index: ng:<tri> -> [names]
+        for (const tri of trigrams(norm)) {
+          const ngKey = `ng:${tri}`;
+          const ngRaw = await env.CORPUS.get(ngKey);
+          const ngSet = new Set<string>(ngRaw ? (JSON.parse(ngRaw) as any) : []);
+          ngSet.add(norm);
+          await env.CORPUS.put(ngKey, JSON.stringify([...ngSet]));
+        }
       }
 
       return json({ ok: true, id, people: peopleList.length });

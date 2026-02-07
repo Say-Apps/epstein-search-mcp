@@ -100,6 +100,13 @@ async function main() {
         continue;
       }
 
+      // Cloudflare KV has value size limits; keep a safe cap for now.
+      const maxChars = 500_000;
+      const originalChars = text.length;
+      if (text.length > maxChars) {
+        text = text.slice(0, maxChars);
+      }
+
       const resp = await upsert({
         id,
         title: id.split("/").slice(-1)[0] || id,
@@ -108,6 +115,9 @@ async function main() {
           source_url: finalUrl,
           fetched_at: new Date().toISOString(),
           content_type: contentType,
+          original_chars: originalChars,
+          truncated: originalChars > maxChars,
+          stored_chars: text.length,
         },
         // Bulk ingest safe defaults (can re-embed later in batches)
         embed: false,

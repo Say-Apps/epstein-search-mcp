@@ -431,6 +431,8 @@ export default {
       const title = body?.title;
       const meta = body?.meta;
       const people = body?.people; // optional array of person names
+      const embed = body?.embed !== false; // default true
+      const indexPeople = body?.index_people === true; // default false (avoid heavy auto-index on bulk ingest)
 
       if (!id || typeof id !== "string" || typeof text !== "string") return json({ error: "invalid_body" }, 400);
 
@@ -447,57 +449,64 @@ export default {
       ids.add(id);
       await env.CORPUS.put("__index__", JSON.stringify([...ids]));
 
-      const peopleList: string[] = Array.isArray(people)
-        ? people.filter((p: any) => typeof p === "string")
-        : extractPeopleHeuristic(text);
+      // People index: OFF by default (bulk ingest safe). Enable by sending { index_people: true, people: [...] }
+      let peopleCount = 0;
+      if (indexPeople) {
+        const peopleList: string[] = Array.isArray(people)
+          ? people.filter((p: any) => typeof p === "string")
+          : extractPeopleHeuristic(text);
 
-      for (const p of peopleList) {
-        const norm = normalizeName(p);
-        const k = `people:${norm}`;
-        const existingRaw = await env.CORPUS.get(k);
-        const existing = new Set<string>(existingRaw ? (JSON.parse(existingRaw) as any) : []);
-        existing.add(id);
-        await env.CORPUS.put(k, JSON.stringify([...existing]));
+        for (const p of peopleList) {
+          const norm = normalizeName(p);
+          const k = `people:${norm}`;
+          const existingRaw = await env.CORPUS.get(k);
+          const existing = new Set<string>(existingRaw ? (JSON.parse(existingRaw) as any) : []);
+          existing.add(id);
+          await env.CORPUS.put(k, JSON.stringify([...existing]));
 
-        // Trigram index: ng:<tri> -> [names]
-        for (const tri of trigrams(norm)) {
-          const ngKey = `ng:${tri}`;
-          const ngRaw = await env.CORPUS.get(ngKey);
-          const ngSet = new Set<string>(ngRaw ? (JSON.parse(ngRaw) as any) : []);
-          ngSet.add(norm);
-          await env.CORPUS.put(ngKey, JSON.stringify([...ngSet]));
+          // Trigram index: ng:<tri> -> [names]
+          for (const tri of trigrams(norm)) {
+            const ngKey = `ng:${tri}`;
+            const ngRaw = await env.CORPUS.get(ngKey);
+            const ngSet = new Set<string>(ngRaw ? (JSON.parse(ngRaw) as any) : []);
+            ngSet.add(norm);
+            await env.CORPUS.put(ngKey, JSON.stringify([...ngSet]));
+          }
         }
+        peopleCount = peopleList.length;
       }
 
-      // Semantic chunks: embed + upsert into Vectorize; store chunk text in KV.
+      // Semantic chunks: can be expensive; allow disabling for bulk ingest.
       let semantic = { chunks: 0, vectors: 0, upserted: 0, error: null as string | null };
-      try {
-        const chunks = chunkText(text, 800).slice(0, 40); // cap to keep costs sane
-        semantic.chunks = chunks.length;
-        const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks });
-        const vectors = embeddings?.data || [];
-        semantic.vectors = Array.isArray(vectors) ? vectors.length : 0;
-        const upserts = [] as any[];
-        for (let i = 0; i < chunks.length; i++) {
-          const chunkId = `${id}::${i}`;
-          const vec = vectors[i];
-          if (!vec) continue;
-          await env.CORPUS.put(`chunk:${chunkId}`, chunks[i]);
-          upserts.push({
-            id: chunkId,
-            values: vec,
-            metadata: { docId: id, title: docObj.title, i },
-          });
+      if (embed) {
+        try {
+          const chunks = chunkText(text, 800).slice(0, 20); // tighter cap to avoid CF limits
+          semantic.chunks = chunks.length;
+          const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks });
+          const vectors = embeddings?.data || [];
+          semantic.vectors = Array.isArray(vectors) ? vectors.length : 0;
+          const upserts = [] as any[];
+          for (let i = 0; i < chunks.length; i++) {
+            const chunkId = `${id}::${i}`;
+            const vec = vectors[i];
+            if (!vec) continue;
+            await env.CORPUS.put(`chunk:${chunkId}`, chunks[i]);
+            upserts.push({
+              id: chunkId,
+              values: vec,
+              metadata: { docId: id, title: docObj.title, i },
+            });
+          }
+          if (upserts.length) {
+            await env.VECTORIZE.upsert(upserts);
+            semantic.upserted = upserts.length;
+          }
+        } catch (e: any) {
+          semantic.error = String(e?.message || e);
         }
-        if (upserts.length) {
-          const r = await env.VECTORIZE.upsert(upserts);
-          semantic.upserted = upserts.length;
-        }
-      } catch (e: any) {
-        semantic.error = String(e?.message || e);
       }
 
-      return json({ ok: true, id, people: peopleList.length, semantic });
+      return json({ ok: true, id, people: peopleCount, semantic });
     }
 
     return json({ error: "unknown_route" }, 404);

@@ -109,6 +109,9 @@ async function main() {
           fetched_at: new Date().toISOString(),
           content_type: contentType,
         },
+        // Bulk ingest safe defaults (can re-embed later in batches)
+        embed: false,
+        index_people: false,
       });
 
       ok++;

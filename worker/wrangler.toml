@@ -1,10 +1,8 @@
-name = "epstein-search-mcp"
+name = "epstein-search"
 main = "src/worker.ts"
 compatibility_date = "2026-02-06"
 
-routes = [
-  { pattern = "epstein.sayapps.ai/*", zone_name = "sayapps.ai" }
-]
+# Custom domain will be configured in Cloudflare dashboard (Workers -> Custom Domains)
 
 kv_namespaces = [
   { binding = "CORPUS", id = "893b9178dd5a4c43ba7d360b92b7dd12" }

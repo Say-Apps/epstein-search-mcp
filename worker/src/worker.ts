@@ -1,5 +1,7 @@
 export interface Env {
   CORPUS: KVNamespace;
+  VECTORIZE: any;
+  AI: any;
   // Secret via `wrangler secret put ADMIN_TOKEN`
   ADMIN_TOKEN?: string;
 }
@@ -65,6 +67,17 @@ function extractPeopleHeuristic(text: string): string[] {
     out.add(cand);
   }
   return [...out];
+}
+
+function chunkText(text: string, maxLen = 800) {
+  const chunks: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const end = Math.min(text.length, i + maxLen);
+    chunks.push(text.slice(i, end));
+    i = end;
+  }
+  return chunks.filter((c) => c.trim().length > 0);
 }
 
 async function getDoc(env: Env, id: string) {
@@ -146,6 +159,15 @@ async function mcpHandleRpc(env: Env, rpc: any) {
             },
           },
           {
+            name: "semantic_search",
+            description: "Semantic search (embeddings via Workers AI, vectors in Vectorize) over chunked documents.",
+            inputSchema: {
+              type: "object",
+              properties: { query: { type: "string" }, limit: { type: "number" } },
+              required: ["query"],
+            },
+          },
+          {
             name: "get_doc",
             description: "Fetch a document by id.",
             inputSchema: {
@@ -194,6 +216,23 @@ async function mcpHandleRpc(env: Env, rpc: any) {
             },
           ],
         },
+      };
+    }
+
+    if (name === "semantic_search") {
+      const query = String(args?.query || "").trim();
+      const limit = Math.max(1, Math.min(20, Number(args?.limit || 5)));
+      if (!query) return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "{}" }] } };
+
+      const emb = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] });
+      const vector = emb?.data?.[0];
+      const r = await env.VECTORIZE.query(vector, { topK: limit, returnMetadata: true });
+      const matches = (r?.matches || []).map((m: any) => ({ id: m.id, score: m.score, metadata: m.metadata }));
+
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: { content: [{ type: "text", text: JSON.stringify({ query, matches }, null, 2) }] },
       };
     }
 
@@ -298,6 +337,22 @@ export default {
       }
 
       return json({ query: q, results });
+    }
+
+    if (url.pathname === "/semantic") {
+      const q = (url.searchParams.get("q") || "").trim();
+      const limit = Math.max(1, Math.min(20, Number(url.searchParams.get("limit") || 5)));
+      if (!q) return json({ query: q, matches: [] });
+
+      const emb = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [q] });
+      const vector = emb?.data?.[0];
+      const r = await env.VECTORIZE.query(vector, { topK: limit, returnMetadata: true });
+      const matches = [] as any[];
+      for (const m of (r?.matches || [])) {
+        const chunkText = await env.CORPUS.get(`chunk:${m.id}`);
+        matches.push({ ...m, chunkText });
+      }
+      return json({ query: q, matches });
     }
 
     if (url.pathname === "/people") {
@@ -414,7 +469,35 @@ export default {
         }
       }
 
-      return json({ ok: true, id, people: peopleList.length });
+      // Semantic chunks: embed + upsert into Vectorize; store chunk text in KV.
+      let semantic = { chunks: 0, vectors: 0, upserted: 0, error: null as string | null };
+      try {
+        const chunks = chunkText(text, 800).slice(0, 40); // cap to keep costs sane
+        semantic.chunks = chunks.length;
+        const embeddings = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks });
+        const vectors = embeddings?.data || [];
+        semantic.vectors = Array.isArray(vectors) ? vectors.length : 0;
+        const upserts = [] as any[];
+        for (let i = 0; i < chunks.length; i++) {
+          const chunkId = `${id}::${i}`;
+          const vec = vectors[i];
+          if (!vec) continue;
+          await env.CORPUS.put(`chunk:${chunkId}`, chunks[i]);
+          upserts.push({
+            id: chunkId,
+            values: vec,
+            metadata: { docId: id, title: docObj.title, i },
+          });
+        }
+        if (upserts.length) {
+          const r = await env.VECTORIZE.upsert(upserts);
+          semantic.upserted = upserts.length;
+        }
+      } catch (e: any) {
+        semantic.error = String(e?.message || e);
+      }
+
+      return json({ ok: true, id, people: peopleList.length, semantic });
     }
 
     return json({ error: "unknown_route" }, 404);

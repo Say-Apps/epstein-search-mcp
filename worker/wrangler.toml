@@ -8,6 +8,12 @@ kv_namespaces = [
   { binding = "CORPUS", id = "893b9178dd5a4c43ba7d360b92b7dd12" }
 ]
 
+vectorize = [
+  { binding = "VECTORIZE", index_name = "epstein-search" }
+]
+
+ai = { binding = "AI" }
+
 [vars]
 # set this in CF dashboard or via `wrangler secret put ADMIN_TOKEN`
 # ADMIN_TOKEN is required to use /admin/upsert

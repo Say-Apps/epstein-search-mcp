@@ -69,11 +69,190 @@ async function getDoc(env: Env, id: string) {
   return { id, title: id, text, meta: {} };
 }
 
+function isMcpPath(pathname: string) {
+  return pathname === "/mcp/sse" || pathname === "/mcp/message";
+}
+
+function cors(res: Response) {
+  const h = new Headers(res.headers);
+  h.set("access-control-allow-origin", "*");
+  h.set("access-control-allow-headers", "content-type,x-admin-token");
+  h.set("access-control-allow-methods", "GET,POST,OPTIONS");
+  return new Response(res.body, { status: res.status, headers: h });
+}
+
+function sse(headersInit: HeadersInit = {}) {
+  const headers = new Headers(headersInit);
+  headers.set("content-type", "text/event-stream; charset=utf-8");
+  headers.set("cache-control", "no-cache");
+  headers.set("connection", "keep-alive");
+  headers.set("access-control-allow-origin", "*");
+  return headers;
+}
+
+function sseEvent(data: unknown, event = "message") {
+  const payload = typeof data === "string" ? data : JSON.stringify(data);
+  return `event: ${event}\ndata: ${payload}\n\n`;
+}
+
+async function mcpHandleRpc(env: Env, rpc: any) {
+  const id = rpc?.id ?? null;
+  const method = rpc?.method;
+  const params = rpc?.params ?? {};
+
+  // Minimal MCP-ish JSON-RPC surface.
+  if (method === "initialize") {
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        protocolVersion: "2024-11-05",
+        serverInfo: { name: "epstein-search", version: "0.1.0" },
+        capabilities: {
+          tools: {},
+        },
+      },
+    };
+  }
+
+  if (method === "tools/list") {
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        tools: [
+          {
+            name: "search",
+            description: "Full-text search over ingested documents.",
+            inputSchema: {
+              type: "object",
+              properties: { query: { type: "string" }, limit: { type: "number" } },
+              required: ["query"],
+            },
+          },
+          {
+            name: "get_doc",
+            description: "Fetch a document by id.",
+            inputSchema: {
+              type: "object",
+              properties: { id: { type: "string" } },
+              required: ["id"],
+            },
+          },
+          {
+            name: "people",
+            description: "List documents associated with a person name.",
+            inputSchema: {
+              type: "object",
+              properties: { name: { type: "string" }, limit: { type: "number" } },
+              required: ["name"],
+            },
+          },
+        ],
+      },
+    };
+  }
+
+  if (method === "tools/call") {
+    const name = params?.name;
+    const args = params?.arguments ?? {};
+    if (name === "search") {
+      const query = String(args?.query || "").trim();
+      const limit = Math.max(1, Math.min(50, Number(args?.limit || 25)));
+      const ids = await listDocIds(env);
+      const results: Array<{ id: string; title: string; snippet: string }> = [];
+      for (const docId of ids) {
+        const doc = await getDoc(env, docId);
+        if (!doc) continue;
+        const s = query ? snippet(doc.text, query) : null;
+        if (s) results.push({ id: docId, title: doc.title || docId, snippet: s });
+        if (results.length >= limit) break;
+      }
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ query, results }, null, 2),
+            },
+          ],
+        },
+      };
+    }
+
+    if (name === "get_doc") {
+      const docId = String(args?.id || "").trim();
+      const doc = await getDoc(env, docId);
+      if (!doc) {
+        return { jsonrpc: "2.0", id, error: { code: -32004, message: "not_found" } };
+      }
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [{ type: "text", text: JSON.stringify(doc, null, 2) }],
+        },
+      };
+    }
+
+    if (name === "people") {
+      const person = String(args?.name || "").trim();
+      const limit = Math.max(1, Math.min(100, Number(args?.limit || 50)));
+      const key = `people:${normalizeName(person)}`;
+      const raw = await env.CORPUS.get(key);
+      const docIds: string[] = raw ? (JSON.parse(raw) as any) : [];
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ name: person, results: docIds.slice(0, limit) }, null, 2),
+            },
+          ],
+        },
+      };
+    }
+
+    return { jsonrpc: "2.0", id, error: { code: -32601, message: `unknown tool: ${name}` } };
+  }
+
+  if (method === "ping") {
+    return { jsonrpc: "2.0", id, result: {} };
+  }
+
+  return { jsonrpc: "2.0", id, error: { code: -32601, message: `unknown method: ${method}` } };
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
 
-    if (url.pathname === "/health") return json({ ok: true, service: "epstein-search" });
+    if (req.method === "OPTIONS") return cors(new Response(null, { status: 204 }));
+
+    // Minimal MCP over SSE + POST (best-effort compatibility)
+    if (isMcpPath(url.pathname)) {
+      if (url.pathname === "/mcp/sse") {
+        // Start SSE stream. We send a hello event. Client should then POST to /mcp/message.
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(sseEvent({ type: "hello", message: "epstein-search MCP endpoint" }, "message")));
+          },
+        });
+        return new Response(stream, { headers: sse() });
+      }
+      if (url.pathname === "/mcp/message" && req.method === "POST") {
+        const rpc = await req.json().catch(() => null);
+        const resp = await mcpHandleRpc(env, rpc);
+        return cors(json(resp));
+      }
+      return cors(json({ error: "mcp_bad_request" }, 400));
+    }
+
+    if (url.pathname === "/health") return cors(json({ ok: true, service: "epstein-search" }));
 
     if (url.pathname === "/") {
       return json({

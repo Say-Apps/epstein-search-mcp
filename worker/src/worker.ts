@@ -2,6 +2,7 @@ export interface Env {
   CORPUS: KVNamespace;
   VECTORIZE: any;
   AI: any;
+  R2: R2Bucket;
   // Secret via `wrangler secret put ADMIN_TOKEN`
   ADMIN_TOKEN?: string;
 }
@@ -81,17 +82,33 @@ function chunkText(text: string, maxLen = 800) {
 }
 
 async function getDoc(env: Env, id: string) {
+  // New layout: meta in KV, text in R2.
   const raw = await env.CORPUS.get(`doc:${id}`);
-  if (raw == null) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.text === "string") {
-      return { id, title: parsed.title || id, text: parsed.text, meta: parsed.meta || {} };
+  if (raw != null) {
+    try {
+      const parsed = JSON.parse(raw);
+      const title = parsed?.title || id;
+      const meta = parsed?.meta || {};
+      const textKey = parsed?.text_key || `text/${id}.txt`;
+      const obj = await env.R2.get(textKey);
+      const text = obj ? await obj.text() : null;
+      if (text != null) return { id, title, text, meta };
+    } catch {
+      // fallthrough
     }
-  } catch {
-    // fallthrough
   }
-  // Backward compat: old layout stored raw text at key=id
+
+  // Backward compat: old layout stored JSON with text or raw text in KV.
+  if (raw != null) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.text === "string") {
+        return { id, title: parsed.title || id, text: parsed.text, meta: parsed.meta || {} };
+      }
+    } catch {
+      // ignore
+    }
+  }
   const text = await env.CORPUS.get(id);
   if (text == null) return null;
   return { id, title: id, text, meta: {} };
@@ -439,10 +456,13 @@ export default {
       const docObj = {
         id,
         title: typeof title === "string" ? title : id,
-        text,
         meta: meta && typeof meta === "object" ? meta : {},
+        text_key: `text/${id}.txt`,
       };
 
+      // Store full text in R2 (avoid KV write limits / value size limits)
+      await env.R2.put(docObj.text_key, text);
+      // Store metadata in KV
       await env.CORPUS.put(`doc:${id}`, JSON.stringify(docObj));
 
       const ids = new Set(await listDocIds(env));

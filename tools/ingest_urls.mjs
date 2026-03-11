@@ -14,30 +14,60 @@ if (!BASE || !TOKEN) {
   process.exit(2);
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function withRetry(fn, { retries = 4, baseDelayMs = 400 } = {}) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn(i);
+    } catch (e) {
+      lastErr = e;
+      if (i === retries) break;
+      const delay = baseDelayMs * Math.pow(2, i) + Math.floor(Math.random() * 200);
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
+}
+
 async function upsert(doc) {
-  const r = await fetch(`${BASE}/admin/upsert`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-admin-token": TOKEN,
-    },
-    body: JSON.stringify(doc),
+  return withRetry(async () => {
+    const r = await fetch(`${BASE}/admin/upsert`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": TOKEN,
+      },
+      body: JSON.stringify(doc),
+    });
+    const t = await r.text();
+    // Retry on transient errors.
+    if (r.status === 429 || (r.status >= 500 && r.status <= 599)) {
+      throw new Error(`Upsert transient ${r.status}: ${t}`);
+    }
+    if (!r.ok) throw new Error(`Upsert failed ${r.status}: ${t}`);
+    return JSON.parse(t);
   });
-  const t = await r.text();
-  if (!r.ok) throw new Error(`Upsert failed ${r.status}: ${t}`);
-  return JSON.parse(t);
 }
 
 async function fetchToFile(url, outPath) {
-  const r = await fetch(url, { redirect: "follow" });
-  if (!r.ok) throw new Error(`Fetch failed ${r.status} ${url}`);
-  const buf = new Uint8Array(await r.arrayBuffer());
-  await writeFile(outPath, buf);
-  return {
-    contentType: r.headers.get("content-type") || "",
-    finalUrl: r.url,
-    bytes: buf.byteLength,
-  };
+  return withRetry(async () => {
+    const r = await fetch(url, { redirect: "follow" });
+    if (r.status === 429 || (r.status >= 500 && r.status <= 599)) {
+      throw new Error(`Fetch transient ${r.status} ${url}`);
+    }
+    if (!r.ok) throw new Error(`Fetch failed ${r.status} ${url}`);
+    const buf = new Uint8Array(await r.arrayBuffer());
+    await writeFile(outPath, buf);
+    return {
+      contentType: r.headers.get("content-type") || "",
+      finalUrl: r.url,
+      bytes: buf.byteLength,
+    };
+  });
 }
 
 async function pdfToText(pdfPath) {
@@ -88,11 +118,17 @@ async function main() {
         finalUrl = meta.finalUrl;
         text = await pdfToText(pdfPath);
       } else {
-        const r = await fetch(url, { redirect: "follow" });
-        if (!r.ok) throw new Error(`Fetch failed ${r.status} ${url}`);
+        const { r, bodyText } = await withRetry(async () => {
+          const r = await fetch(url, { redirect: "follow" });
+          if (r.status === 429 || (r.status >= 500 && r.status <= 599)) {
+            throw new Error(`Fetch transient ${r.status} ${url}`);
+          }
+          if (!r.ok) throw new Error(`Fetch failed ${r.status} ${url}`);
+          return { r, bodyText: await r.text() };
+        });
         contentType = r.headers.get("content-type") || "";
         finalUrl = r.url;
-        text = await r.text();
+        text = bodyText;
       }
 
       if (!text || text.trim().length < 50) {

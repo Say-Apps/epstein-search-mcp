@@ -18,6 +18,26 @@ npm run dev
 # http://127.0.0.1:3333/doc?id=<filename>
 ```
 
+## Bulk ingest helper
+
+`tools/ingest_urls.mjs` can ingest a list of URLs into the service via the `/admin/upsert` endpoint.
+
+It supports either env vars or CLI flags:
+
+```bash
+# Option A: env vars
+export EPSTEIN_SEARCH_URL="https://<your-service>"
+export EPSTEIN_ADMIN_TOKEN="<token>"
+
+bun tools/ingest_urls.mjs ./epstein_urls_100.txt
+
+# Option B: CLI flags (no env setup)
+bun tools/ingest_urls.mjs ./epstein_urls_100.txt \
+  --base "https://<your-service>" \
+  --token "<token>" \
+  --retries 4
+```
+
 ## Worker (Cloudflare)
 
 See `./worker/README.md`.

@@ -7,10 +7,34 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const BASE = process.env.EPSTEIN_SEARCH_URL;
-const TOKEN = process.env.EPSTEIN_ADMIN_TOKEN;
+function parseArgs(argv) {
+  const args = { _: [] };
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--base") args.base = argv[++i];
+    else if (a === "--token") args.token = argv[++i];
+    else if (a === "--retries") args.retries = Number(argv[++i]);
+    else if (a === "--help" || a === "-h") args.help = true;
+    else args._.push(a);
+  }
+  return args;
+}
+
+const ARGS = parseArgs(process.argv);
+if (ARGS.help) {
+  console.log(
+    "Usage: bun tools/ingest_urls.mjs urls.txt [--base https://... --token xxx --retries 4]\n" +
+      "Env fallback: EPSTEIN_SEARCH_URL + EPSTEIN_ADMIN_TOKEN"
+  );
+  process.exit(0);
+}
+
+const BASE = ARGS.base || process.env.EPSTEIN_SEARCH_URL;
+const TOKEN = ARGS.token || process.env.EPSTEIN_ADMIN_TOKEN;
 if (!BASE || !TOKEN) {
-  console.error("Missing EPSTEIN_SEARCH_URL or EPSTEIN_ADMIN_TOKEN");
+  console.error(
+    "Missing base/token. Provide --base/--token or set EPSTEIN_SEARCH_URL + EPSTEIN_ADMIN_TOKEN"
+  );
   process.exit(2);
 }
 
@@ -18,7 +42,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function withRetry(fn, { retries = 4, baseDelayMs = 400 } = {}) {
+async function withRetry(fn, { retries = ARGS.retries ?? 4, baseDelayMs = 400 } = {}) {
   let lastErr;
   for (let i = 0; i <= retries; i++) {
     try {

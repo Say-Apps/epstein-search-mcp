@@ -161,7 +161,8 @@ async function main() {
       }
 
       // Cloudflare KV has value size limits; keep a safe cap for now.
-      const maxChars = 500_000;
+      const maxChars = 2_000_000;
+      // Worker stores text in R2 now, so we can keep a higher cap; still avoid extreme payload sizes.
       const originalChars = text.length;
       if (text.length > maxChars) {
         text = text.slice(0, maxChars);

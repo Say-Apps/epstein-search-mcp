@@ -22,6 +22,14 @@ npm run dev
 
 `tools/ingest_urls.mjs` can ingest a list of URLs into the service via the `/admin/upsert` endpoint.
 
+## Quick validator (search → doc)
+
+`tools/validate_search_docs.mjs` calls `/search` and then fetches `/doc?id=...` for the first N results to measure success rate + latency.
+
+```bash
+bun tools/validate_search_docs.mjs --base "https://<your-service>" --q epstein --n 15
+```
+
 It supports either env vars or CLI flags:
 
 ```bash

@@ -47,6 +47,13 @@ bun tools/ingest_urls.mjs ./epstein_urls_100.txt \
   --concurrency 3 \
   --embed \
   --index-people
+
+# Dry run (fetch/parse only; no /admin/upsert calls)
+bun tools/ingest_urls.mjs ./epstein_urls_100.txt \
+  --base "https://<your-service>" \
+  --token "<token>" \
+  --concurrency 3 \
+  --dry-run | head
 ```
 
 ## Worker (Cloudflare)

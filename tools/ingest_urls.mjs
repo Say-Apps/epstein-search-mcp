@@ -17,6 +17,7 @@ function parseArgs(argv) {
     else if (a === "--concurrency") args.concurrency = Number(argv[++i]);
     else if (a === "--embed") args.embed = true;
     else if (a === "--index-people") args.indexPeople = true;
+    else if (a === "--dry-run") args.dryRun = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else args._.push(a);
   }
@@ -26,7 +27,7 @@ function parseArgs(argv) {
 const ARGS = parseArgs(process.argv);
 if (ARGS.help) {
   console.log(
-    "Usage: bun tools/ingest_urls.mjs urls.txt [--base https://... --token xxx --retries 4 --concurrency 3 --embed --index-people]\n" +
+    "Usage: bun tools/ingest_urls.mjs urls.txt [--base https://... --token xxx --retries 4 --concurrency 3 --embed --index-people --dry-run]\n" +
       "Env fallback: EPSTEIN_SEARCH_URL + EPSTEIN_ADMIN_TOKEN"
   );
   process.exit(0);
@@ -185,6 +186,14 @@ async function main() {
       const originalChars = text.length;
       if (text.length > maxChars) {
         text = text.slice(0, maxChars);
+      }
+
+      if (ARGS.dryRun) {
+        ok++;
+        process.stdout.write(
+          `DRYRUN ${ok}: ${url} -> id=${id} chars=${text.length} embed=${!!ARGS.embed} index_people=${!!ARGS.indexPeople}\n`
+        );
+        return;
       }
 
       const resp = await upsert({

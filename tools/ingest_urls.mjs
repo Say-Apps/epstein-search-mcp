@@ -14,6 +14,7 @@ function parseArgs(argv) {
     if (a === "--base") args.base = argv[++i];
     else if (a === "--token") args.token = argv[++i];
     else if (a === "--retries") args.retries = Number(argv[++i]);
+    else if (a === "--concurrency") args.concurrency = Number(argv[++i]);
     else if (a === "--help" || a === "-h") args.help = true;
     else args._.push(a);
   }
@@ -23,7 +24,7 @@ function parseArgs(argv) {
 const ARGS = parseArgs(process.argv);
 if (ARGS.help) {
   console.log(
-    "Usage: bun tools/ingest_urls.mjs urls.txt [--base https://... --token xxx --retries 4]\n" +
+    "Usage: bun tools/ingest_urls.mjs urls.txt [--base https://... --token xxx --retries 4 --concurrency 3]\n" +
       "Env fallback: EPSTEIN_SEARCH_URL + EPSTEIN_ADMIN_TOKEN"
   );
   process.exit(0);
@@ -40,6 +41,21 @@ if (!BASE || !TOKEN) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const n = Math.max(1, Math.min(limit ?? 1, items.length || 1));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return results;
 }
 
 async function withRetry(fn, { retries = ARGS.retries ?? 4, baseDelayMs = 400 } = {}) {
@@ -126,7 +142,9 @@ async function main() {
     fail = 0,
     skipped = 0;
 
-  for (const url of urls) {
+  const concurrency = Number.isFinite(ARGS.concurrency) ? ARGS.concurrency : 3;
+
+  await mapLimit(urls, concurrency, async (url) => {
     try {
       const ext = extname(new URL(url).pathname).toLowerCase();
       const id = safeId(url);
@@ -157,12 +175,11 @@ async function main() {
 
       if (!text || text.trim().length < 50) {
         skipped++;
-        continue;
+        return;
       }
 
-      // Cloudflare KV has value size limits; keep a safe cap for now.
+      // Worker stores text in R2 now, but still avoid extreme payload sizes.
       const maxChars = 2_000_000;
-      // Worker stores text in R2 now, so we can keep a higher cap; still avoid extreme payload sizes.
       const originalChars = text.length;
       if (text.length > maxChars) {
         text = text.slice(0, maxChars);
@@ -193,9 +210,9 @@ async function main() {
       fail++;
       process.stdout.write(`FAIL ${fail}: ${url} :: ${String(e)}\n`);
     }
-  }
+  });
 
-  console.log(JSON.stringify({ ok, fail, skipped, total: urls.length }));
+  console.log(JSON.stringify({ ok, fail, skipped, total: urls.length, concurrency }));
 }
 
 main();

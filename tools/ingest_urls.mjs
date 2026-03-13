@@ -15,6 +15,8 @@ function parseArgs(argv) {
     else if (a === "--token") args.token = argv[++i];
     else if (a === "--retries") args.retries = Number(argv[++i]);
     else if (a === "--concurrency") args.concurrency = Number(argv[++i]);
+    else if (a === "--embed") args.embed = true;
+    else if (a === "--index-people") args.indexPeople = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else args._.push(a);
   }
@@ -24,7 +26,7 @@ function parseArgs(argv) {
 const ARGS = parseArgs(process.argv);
 if (ARGS.help) {
   console.log(
-    "Usage: bun tools/ingest_urls.mjs urls.txt [--base https://... --token xxx --retries 4 --concurrency 3]\n" +
+    "Usage: bun tools/ingest_urls.mjs urls.txt [--base https://... --token xxx --retries 4 --concurrency 3 --embed --index-people]\n" +
       "Env fallback: EPSTEIN_SEARCH_URL + EPSTEIN_ADMIN_TOKEN"
   );
   process.exit(0);
@@ -197,9 +199,9 @@ async function main() {
           truncated: originalChars > maxChars,
           stored_chars: text.length,
         },
-        // Bulk ingest safe defaults (can re-embed later in batches)
-        embed: false,
-        index_people: false,
+        // Bulk ingest defaults (can re-embed / index later)
+        embed: !!ARGS.embed,
+        index_people: !!ARGS.indexPeople,
       });
 
       ok++;

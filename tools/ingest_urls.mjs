@@ -176,8 +176,10 @@ async function main() {
         text = bodyText;
       }
 
-      if (!text || text.trim().length < 50) {
+      const trimmedLen = (text || "").trim().length;
+      if (!text || trimmedLen < 50) {
         skipped++;
+        process.stdout.write(`SKIP ${skipped}: ${url} :: short_text chars=${trimmedLen}\n`);
         return;
       }
 

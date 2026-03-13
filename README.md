@@ -43,7 +43,8 @@ bun tools/ingest_urls.mjs ./epstein_urls_100.txt
 bun tools/ingest_urls.mjs ./epstein_urls_100.txt \
   --base "https://<your-service>" \
   --token "<token>" \
-  --retries 4
+  --retries 4 \
+  --concurrency 3
 ```
 
 ## Worker (Cloudflare)
